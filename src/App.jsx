@@ -4,12 +4,14 @@ import {
   Check,
   Clipboard,
   FileImage,
+  HelpCircle,
   Plus,
   ReceiptText,
   Sparkles,
   Trash2,
   Upload,
   Users,
+  X,
 } from "lucide-react";
 import Tesseract from "tesseract.js";
 import {
@@ -24,18 +26,30 @@ import { buildGroupMessage, buildReceiptMessage } from "./messages.js";
 import { parseReceiptText } from "./receiptParser.js";
 import { loadGroups, saveGroups, uid } from "./storage.js";
 
-const DEFAULT_MEMBERS = ["Omar", "Muhammad", "Zak", "Umar", "Abdullah"];
+const SAMPLE_MEMBERS = ["Omar", "Muhammad", "Zak", "Umar", "Abdullah"];
 const TODAY = new Date().toISOString().slice(0, 10);
 
 function makeDefaultGroup() {
   return {
     id: uid("group"),
-    name: "KL Dinner",
+    name: "New Trip",
     currency: "RM",
-    members: DEFAULT_MEMBERS.map((name) => ({ id: uid("member"), name })),
+    members: [],
     expenses: [],
     createdAt: new Date().toISOString(),
   };
+}
+
+function hasOnlyOldSampleData(groups) {
+  if (!Array.isArray(groups) || groups.length !== 1) return false;
+  const [group] = groups;
+  const names = (group.members || []).map((member) => member.name);
+  return (
+    group.name === "KL Dinner" &&
+    (group.expenses || []).length === 0 &&
+    names.length === SAMPLE_MEMBERS.length &&
+    SAMPLE_MEMBERS.every((name, index) => names[index] === name)
+  );
 }
 
 function emptyReceipt(group) {
@@ -139,12 +153,17 @@ async function copyText(text, onCopied) {
 }
 
 function App() {
-  const initialGroups = useMemo(() => loadGroups() || [makeDefaultGroup()], []);
+  const initialGroups = useMemo(() => {
+    const savedGroups = loadGroups();
+    if (!savedGroups || hasOnlyOldSampleData(savedGroups)) return [makeDefaultGroup()];
+    return savedGroups;
+  }, []);
   const [groups, setGroups] = useState(initialGroups);
   const [activeGroupId, setActiveGroupId] = useState(initialGroups[0]?.id);
   const [newGroupName, setNewGroupName] = useState("");
   const [newMemberName, setNewMemberName] = useState("");
   const [tab, setTab] = useState("receipt");
+  const [showGuide, setShowGuide] = useState(false);
   const [toast, setToast] = useState("");
 
   const group = groups.find((entry) => entry.id === activeGroupId) || groups[0];
@@ -218,6 +237,10 @@ function App() {
           <h1>Receipt Splitter</h1>
         </div>
         <div className="topbar-actions">
+          <button className="secondary-button" onClick={() => setShowGuide(true)}>
+            <HelpCircle size={16} />
+            How to use
+          </button>
           <select
             value={group.currency}
             onChange={(event) => updateCurrency(event.target.value)}
@@ -233,6 +256,8 @@ function App() {
           {toast && <span className="toast"><Check size={16} />{toast}</span>}
         </div>
       </header>
+
+      {showGuide && <GuideOverlay onClose={() => setShowGuide(false)} />}
 
       <section className="layout">
         <aside className="side-panel">
@@ -255,7 +280,7 @@ function App() {
             <input
               value={newGroupName}
               onChange={(event) => setNewGroupName(event.target.value)}
-              placeholder="Langkawi Trip"
+              placeholder="Trip name"
             />
             <button className="icon-button" onClick={addGroup} aria-label="Add trip group">
               <Plus size={18} />
@@ -266,11 +291,15 @@ function App() {
             <h2>People</h2>
           </div>
           <div className="member-list">
-            {group.members.map((member) => (
-              <span className="member-pill" key={member.id}>
-                {member.name}
-              </span>
-            ))}
+            {group.members.length ? (
+              group.members.map((member) => (
+                <span className="member-pill" key={member.id}>
+                  {member.name}
+                </span>
+              ))
+            ) : (
+              <div className="empty-state compact-empty">No people added yet.</div>
+            )}
           </div>
           <div className="inline-form">
             <input
@@ -337,6 +366,85 @@ function App() {
         </section>
       </section>
     </main>
+  );
+}
+
+function GuideOverlay({ onClose }) {
+  return (
+    <div className="guide-backdrop" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+      <section className="guide-panel">
+        <div className="guide-header">
+          <div>
+            <p className="eyebrow">Quick start</p>
+            <h2 id="guide-title">How to use Receipt Splitter</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Close guide">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="guide-grid">
+          <article className="guide-card">
+            <div className="guide-visual people-visual">
+              <span />
+              <span />
+              <span />
+            </div>
+            <strong>1. Add people</strong>
+            <p>Create a trip group and add the friends who will share expenses.</p>
+          </article>
+
+          <article className="guide-card">
+            <div className="guide-visual upload-visual">
+              <FileImage size={34} />
+              <span />
+            </div>
+            <strong>2. Upload a receipt</strong>
+            <p>Choose a photo, take a picture, drag it in, or paste a screenshot.</p>
+          </article>
+
+          <article className="guide-card">
+            <div className="guide-visual scan-visual">
+              <Sparkles size={28} />
+              <div>
+                <span />
+                <span />
+                <span />
+              </div>
+            </div>
+            <strong>3. Read with AI</strong>
+            <p>Use AI Read Receipt, then edit any item, quantity, tax, or fee.</p>
+          </article>
+
+          <article className="guide-card">
+            <div className="guide-visual split-visual">
+              <span className="mini-item" />
+              <span className="mini-person" />
+              <span className="mini-person" />
+            </div>
+            <strong>4. Split items</strong>
+            <p>Tap names or drag items to people. Shared items split equally or custom.</p>
+          </article>
+
+          <article className="guide-card">
+            <div className="guide-visual summary-visual">
+              <span />
+              <span />
+              <span />
+            </div>
+            <strong>5. Copy summary</strong>
+            <p>Save the receipt to the trip and copy the WhatsApp message.</p>
+          </article>
+        </div>
+
+        <div className="guide-footer">
+          <button className="primary-button" onClick={onClose}>
+            <Check size={16} />
+            Start splitting
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -413,7 +521,7 @@ function TripDashboard({ group, summary, onCopy }) {
 
 function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
   const [receipt, setReceipt] = useState(() => emptyReceipt(group));
-  const [title, setTitle] = useState("Restaurant receipt");
+  const [title, setTitle] = useState("Receipt");
   const [date, setDate] = useState(TODAY);
   const [paidBy, setPaidBy] = useState(group.members[0]?.id || "");
   const [imageUrl, setImageUrl] = useState("");
@@ -1168,7 +1276,7 @@ function FeeEditor({ fee, members, currency, onUpdate, onDelete }) {
 
 function ManualExpenseForm({ group, onSaveExpense }) {
   const [form, setForm] = useState({
-    title: "Taxi",
+    title: "",
     amount: "",
     currency: group.currency,
     paidBy: group.members[0]?.id || "",
@@ -1238,7 +1346,7 @@ function ManualExpenseForm({ group, onSaveExpense }) {
     <section className="tool-panel manual-panel">
       <div className="panel-heading">
         <div>
-          <p className="eyebrow">Taxi, hotel, fuel, snacks</p>
+          <p className="eyebrow">Manual expense</p>
           <h2>Expense Without Receipt</h2>
         </div>
         <button className="primary-button" onClick={saveManualExpense}>
