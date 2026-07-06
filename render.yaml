@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: receipt-splitter
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: pnpm install && pnpm run build
+    startCommand: pnpm run start
+    autoDeployTrigger: commit
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5.5
