@@ -346,6 +346,23 @@ function App() {
     window.setTimeout(() => setToast(""), 1800);
   }
 
+  function updateExpense(expenseId, patch) {
+    updateActiveGroup((entry) => ({
+      ...entry,
+      expenses: entry.expenses.map((expense) =>
+        expense.id === expenseId
+          ? {
+              ...expense,
+              ...patch,
+              updatedAt: new Date().toISOString(),
+            }
+          : expense,
+      ),
+    }));
+    setToast("Expense updated");
+    window.setTimeout(() => setToast(""), 1800);
+  }
+
   function deleteExpense(expenseId) {
     updateActiveGroup((entry) => ({
       ...entry,
@@ -498,6 +515,7 @@ function App() {
             <ExpenseLedger
               group={group}
               onDeleteExpense={deleteExpense}
+              onUpdateExpense={updateExpense}
             />
           )}
         </section>
@@ -1020,6 +1038,15 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
         imageUrl,
       },
     });
+
+    setReceipt(emptyReceipt(group));
+    setTitle("Receipt");
+    setDate(TODAY);
+    setPaidBy(group.members[0]?.id || "");
+    setImageUrl("");
+    setAttachmentName("");
+    setOcrStatus("");
+    onToast("Saved. Ready for next receipt.");
   }
 
   const receiptMessage = buildReceiptMessage(
@@ -1715,8 +1742,9 @@ function ManualExpenseForm({ group, onSaveExpense }) {
   );
 }
 
-function ExpenseLedger({ group, onDeleteExpense }) {
+function ExpenseLedger({ group, onDeleteExpense, onUpdateExpense }) {
   const memberById = Object.fromEntries(group.members.map((member) => [member.id, member]));
+  const [editingId, setEditingId] = useState("");
 
   return (
     <section className="tool-panel ledger-panel">
@@ -1727,35 +1755,219 @@ function ExpenseLedger({ group, onDeleteExpense }) {
         </div>
       </div>
       <div className="ledger-list">
-        {group.expenses.map((expense) => (
-          <article className="ledger-item" key={expense.id}>
-            <div>
-              <strong>{expense.title}</strong>
-              <span>
-                {expense.date} - paid by {memberById[expense.paidBy]?.name || "Unknown"}
-              </span>
-              {expense.attachment && (
-                <span className="attachment-name">
-                  Attachment: {expense.attachment.name}
+        {group.expenses.map((expense) =>
+          editingId === expense.id ? (
+            <ExpenseEditor
+              expense={expense}
+              group={group}
+              key={expense.id}
+              onCancel={() => setEditingId("")}
+              onSave={(patch) => {
+                onUpdateExpense(expense.id, patch);
+                setEditingId("");
+              }}
+            />
+          ) : (
+            <article className="ledger-item" key={expense.id}>
+              <div>
+                <strong>{expense.title || "Untitled expense"}</strong>
+                <span>
+                  {expense.date} - paid by {memberById[expense.paidBy]?.name || "Unknown"}
                 </span>
+                {expense.attachment && (
+                  <span className="attachment-name">
+                    Attachment: {expense.attachment.name}
+                  </span>
+                )}
+              </div>
+              {expense.attachment?.dataUrl && (
+                <img
+                  className="ledger-thumb"
+                  src={expense.attachment.dataUrl}
+                  alt={expense.attachment.name}
+                />
               )}
-            </div>
-            {expense.attachment?.dataUrl && (
-              <img
-                className="ledger-thumb"
-                src={expense.attachment.dataUrl}
-                alt={expense.attachment.name}
-              />
-            )}
-            <b>{formatMoney(expense.amount, expense.currency || group.currency)}</b>
-            <button className="icon-button danger" onClick={() => onDeleteExpense(expense.id)} aria-label="Delete expense">
-              <Trash2 size={16} />
-            </button>
-          </article>
-        ))}
+              <b>{formatMoney(expense.amount, expense.currency || group.currency)}</b>
+              <div className="ledger-actions">
+                <button className="tiny-button" onClick={() => setEditingId(expense.id)}>
+                  Edit
+                </button>
+                <button className="icon-button danger" onClick={() => onDeleteExpense(expense.id)} aria-label="Delete expense">
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </article>
+          ),
+        )}
         {!group.expenses.length && <div className="empty-state">No expenses saved yet.</div>}
       </div>
     </section>
+  );
+}
+
+function ExpenseEditor({ expense, group, onCancel, onSave }) {
+  const [form, setForm] = useState(() => ({
+    title: expense.title || "",
+    amount: String(expense.amount ?? ""),
+    currency: expense.currency || group.currency,
+    paidBy: expense.paidBy || group.members[0]?.id || "",
+    participantIds:
+      expense.participantIds?.length
+        ? expense.participantIds
+        : group.members.map((member) => member.id),
+    splitType:
+      expense.splitType === "customAmount" || expense.splitType === "customPercent"
+        ? expense.splitType
+        : "equal",
+    date: expense.date || TODAY,
+    notes: expense.notes || "",
+    customShares: expense.customShares || expense.shares || {},
+  }));
+
+  const previewExpense = {
+    ...form,
+    amount: Number(form.amount || 0),
+  };
+  const shares = computeSimpleExpenseShares(previewExpense);
+
+  function updateForm(patch) {
+    setForm((current) => ({ ...current, ...patch }));
+  }
+
+  function toggleParticipant(memberId) {
+    const active = new Set(form.participantIds);
+    if (active.has(memberId)) active.delete(memberId);
+    else active.add(memberId);
+    updateForm({ participantIds: [...active] });
+  }
+
+  function saveEdit() {
+    const splitType =
+      form.splitType === "customAmount"
+        ? "customAmount"
+        : form.splitType === "customPercent"
+          ? "customPercent"
+          : "equal";
+
+    onSave({
+      title: form.title,
+      amount: Number(form.amount || 0),
+      currency: form.currency || group.currency,
+      paidBy: form.paidBy,
+      participantIds: form.participantIds,
+      splitType,
+      date: form.date,
+      notes: form.notes,
+      customShares: form.customShares,
+      shares,
+    });
+  }
+
+  return (
+    <article className="ledger-editor">
+      <div className="manual-grid">
+        <label>
+          Expense title
+          <input value={form.title} onChange={(event) => updateForm({ title: event.target.value })} />
+        </label>
+        <label>
+          Amount
+          <input
+            type="number"
+            step="0.01"
+            value={form.amount}
+            onChange={(event) => updateForm({ amount: event.target.value })}
+          />
+        </label>
+        <label>
+          Currency
+          <input value={form.currency} onChange={(event) => updateForm({ currency: event.target.value })} />
+        </label>
+        <label>
+          Who paid
+          <select value={form.paidBy} onChange={(event) => updateForm({ paidBy: event.target.value })}>
+            {group.members.map((member) => (
+              <option key={member.id} value={member.id}>{member.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Date
+          <input type="date" value={form.date} onChange={(event) => updateForm({ date: event.target.value })} />
+        </label>
+        <label>
+          Split type
+          <select value={form.splitType} onChange={(event) => updateForm({ splitType: event.target.value })}>
+            <option value="equal">Equal</option>
+            <option value="customAmount">Custom amount</option>
+            <option value="customPercent">Custom percentage</option>
+          </select>
+        </label>
+        <label className="wide-input">
+          Notes
+          <input value={form.notes} onChange={(event) => updateForm({ notes: event.target.value })} />
+        </label>
+      </div>
+
+      <div className="participant-row">
+        <span><Users size={16} /> Shared by</span>
+        {group.members.map((member) => (
+          <button
+            key={member.id}
+            className={form.participantIds.includes(member.id) ? "chip selected" : "chip"}
+            onClick={() => toggleParticipant(member.id)}
+          >
+            {member.name}
+          </button>
+        ))}
+      </div>
+
+      {form.splitType !== "equal" && (
+        <div className="share-grid">
+          {group.members
+            .filter((member) => form.participantIds.includes(member.id))
+            .map((member) => (
+              <label key={member.id}>
+                {member.name}
+                <input
+                  type="number"
+                  step={form.splitType === "customPercent" ? "1" : "0.01"}
+                  value={form.customShares[member.id] || ""}
+                  onChange={(event) =>
+                    updateForm({
+                      customShares: {
+                        ...form.customShares,
+                        [member.id]: Number(event.target.value || 0),
+                      },
+                    })
+                  }
+                />
+              </label>
+            ))}
+        </div>
+      )}
+
+      <div className="summary-list manual-summary edit-summary">
+        {group.members
+          .filter((member) => form.participantIds.includes(member.id))
+          .map((member) => (
+            <div className="summary-row" key={member.id}>
+              <strong>{member.name}</strong>
+              <b>{formatMoney(shares[member.id] || 0, form.currency || group.currency)}</b>
+            </div>
+          ))}
+      </div>
+
+      <div className="button-row edit-actions">
+        <button className="secondary-button" onClick={onCancel}>
+          Cancel
+        </button>
+        <button className="primary-button" onClick={saveEdit}>
+          <Check size={16} />
+          Save changes
+        </button>
+      </div>
+    </article>
   );
 }
 
