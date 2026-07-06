@@ -25,6 +25,12 @@ import {
 import { buildGroupMessage, buildReceiptMessage } from "./messages.js";
 import { parseReceiptText } from "./receiptParser.js";
 import { loadGroups, saveGroups, uid } from "./storage.js";
+import {
+  isSupabaseConfigured,
+  loadRemoteGroups,
+  saveRemoteGroups,
+  supabase,
+} from "./supabaseClient.js";
 
 const SAMPLE_MEMBERS = ["Omar", "Muhammad", "Zak", "Umar", "Abdullah"];
 const TODAY = new Date().toISOString().slice(0, 10);
@@ -164,14 +170,133 @@ function App() {
   const [newMemberName, setNewMemberName] = useState("");
   const [tab, setTab] = useState("receipt");
   const [showGuide, setShowGuide] = useState(false);
+  const [authReady, setAuthReady] = useState(!isSupabaseConfigured);
+  const [authUser, setAuthUser] = useState(null);
+  const [authMessage, setAuthMessage] = useState("");
+  const [remoteLoaded, setRemoteLoaded] = useState(!isSupabaseConfigured);
+  const [syncStatus, setSyncStatus] = useState(
+    isSupabaseConfigured ? "Checking account" : "Local only",
+  );
   const [toast, setToast] = useState("");
+  const groupsRef = useRef(initialGroups);
 
   const group = groups.find((entry) => entry.id === activeGroupId) || groups[0];
   const summary = useMemo(() => summarizeTrip(group), [group]);
 
   useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return undefined;
+
+    let mounted = true;
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      const user = data.session?.user || null;
+      setAuthUser(user);
+      setAuthReady(true);
+      setRemoteLoaded(!user);
+      setSyncStatus(user ? "Loading account" : "Local only");
+    });
+
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!mounted) return;
+      const user = session?.user || null;
+      setAuthUser(user);
+      setRemoteLoaded(!user);
+      setSyncStatus(user ? "Loading account" : "Local only");
+    });
+
+    return () => {
+      mounted = false;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !authReady || !authUser) return undefined;
+
+    let cancelled = false;
+    setRemoteLoaded(false);
+    setSyncStatus("Loading account");
+
+    loadRemoteGroups(authUser.id)
+      .then(async (remoteGroups) => {
+        if (cancelled) return;
+
+        if (remoteGroups?.length) {
+          const nextGroups = hasOnlyOldSampleData(remoteGroups)
+            ? [makeDefaultGroup()]
+            : remoteGroups;
+          setGroups(nextGroups);
+          setActiveGroupId(nextGroups[0]?.id);
+          saveGroups(nextGroups);
+        } else {
+          await saveRemoteGroups(authUser.id, groupsRef.current);
+        }
+
+        if (!cancelled) {
+          setRemoteLoaded(true);
+          setSyncStatus("Saved");
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRemoteLoaded(true);
+          setSyncStatus("Sync error");
+          setAuthMessage(error.message || "Could not load account data.");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, authUser?.id]);
+
+  useEffect(() => {
     saveGroups(groups);
   }, [groups]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !authUser || !remoteLoaded) return undefined;
+
+    setSyncStatus("Saving");
+    const timeout = window.setTimeout(() => {
+      saveRemoteGroups(authUser.id, groups)
+        .then(() => setSyncStatus("Saved"))
+        .catch((error) => {
+          setSyncStatus("Sync error");
+          setAuthMessage(error.message || "Could not save account data.");
+        });
+    }, 700);
+
+    return () => window.clearTimeout(timeout);
+  }, [groups, authUser?.id, remoteLoaded]);
+
+  async function signIn(email, password) {
+    if (!supabase) return;
+    setAuthMessage("");
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setAuthMessage(error ? error.message : "Logged in.");
+  }
+
+  async function signUp(email, password) {
+    if (!supabase) return;
+    setAuthMessage("");
+    const { error } = await supabase.auth.signUp({ email, password });
+    setAuthMessage(error ? error.message : "Account created. Check email if needed.");
+  }
+
+  async function signOut() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setAuthUser(null);
+    setRemoteLoaded(true);
+    setSyncStatus("Local only");
+    setAuthMessage("");
+  }
 
   function updateActiveGroup(updater) {
     setGroups((current) =>
@@ -256,6 +381,17 @@ function App() {
           {toast && <span className="toast"><Check size={16} />{toast}</span>}
         </div>
       </header>
+
+      <AuthPanel
+        authMessage={authMessage}
+        authReady={authReady}
+        isConfigured={isSupabaseConfigured}
+        onSignIn={signIn}
+        onSignOut={signOut}
+        onSignUp={signUp}
+        syncStatus={syncStatus}
+        user={authUser}
+      />
 
       {showGuide && <GuideOverlay onClose={() => setShowGuide(false)} />}
 
@@ -366,6 +502,108 @@ function App() {
         </section>
       </section>
     </main>
+  );
+}
+
+function AuthPanel({
+  authMessage,
+  authReady,
+  isConfigured,
+  onSignIn,
+  onSignOut,
+  onSignUp,
+  syncStatus,
+  user,
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(action) {
+    const cleanEmail = email.trim();
+    if (!cleanEmail || !password) return;
+    setBusy(true);
+    try {
+      await action(cleanEmail, password);
+      setPassword("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!isConfigured) {
+    return (
+      <section className="auth-strip">
+        <div>
+          <strong>Local only</strong>
+          <span>Database is not connected.</span>
+        </div>
+      </section>
+    );
+  }
+
+  if (!authReady) {
+    return (
+      <section className="auth-strip">
+        <div>
+          <strong>Account</strong>
+          <span>Checking account</span>
+        </div>
+      </section>
+    );
+  }
+
+  if (user) {
+    return (
+      <section className="auth-strip">
+        <div>
+          <strong>{user.email}</strong>
+          <span>{syncStatus}</span>
+          {authMessage && <span>{authMessage}</span>}
+        </div>
+        <button className="secondary-button" onClick={onSignOut}>
+          Log out
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="auth-strip auth-form">
+      <div>
+        <strong>Account</strong>
+        <span>{authMessage || syncStatus}</span>
+      </div>
+      <input
+        autoComplete="email"
+        inputMode="email"
+        onChange={(event) => setEmail(event.target.value)}
+        placeholder="Email"
+        type="email"
+        value={email}
+      />
+      <input
+        autoComplete="current-password"
+        onChange={(event) => setPassword(event.target.value)}
+        placeholder="Password"
+        type="password"
+        value={password}
+      />
+      <button
+        className="secondary-button"
+        disabled={busy}
+        onClick={() => submit(onSignIn)}
+      >
+        Log in
+      </button>
+      <button
+        className="primary-button"
+        disabled={busy}
+        onClick={() => submit(onSignUp)}
+      >
+        Sign up
+      </button>
+    </section>
   );
 }
 

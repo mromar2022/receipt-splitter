@@ -12,3 +12,7 @@ services:
         sync: false
       - key: OPENAI_MODEL
         value: gpt-5.5
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false

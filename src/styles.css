@@ -101,6 +101,42 @@ button:disabled {
   max-width: 1440px;
 }
 
+.auth-strip {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  margin: 0 auto 18px;
+  max-width: 1440px;
+  padding: 10px 12px;
+}
+
+.auth-strip div {
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+}
+
+.auth-strip strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-strip span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auth-form {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1fr) minmax(150px, 0.8fr) auto auto;
+}
+
 .side-panel,
 .dashboard,
 .tool-panel {
@@ -920,6 +956,14 @@ dd {
     grid-template-columns: 1fr;
   }
 
+  .auth-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .auth-form div {
+    grid-column: 1 / -1;
+  }
+
   .side-panel {
     position: static;
   }
@@ -948,7 +992,8 @@ dd {
   }
 
   .topbar-actions,
-  .button-row {
+  .button-row,
+  .auth-strip {
     width: 100%;
   }
 
@@ -957,6 +1002,17 @@ dd {
   .primary-button,
   .secondary-button {
     flex: 1;
+  }
+
+  .auth-strip,
+  .auth-form {
+    align-items: stretch;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .auth-strip button {
+    width: 100%;
   }
 
   .stat-grid,
