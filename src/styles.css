@@ -338,6 +338,12 @@ label select {
   padding: 16px;
 }
 
+.single-use-banner p {
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
 .stat-grid {
   display: grid;
   gap: 10px;
@@ -493,7 +499,7 @@ dd {
 }
 
 .fee-grid {
-  grid-template-columns: minmax(180px, 1.5fr) 130px 150px 44px;
+  grid-template-columns: minmax(180px, 1.5fr) 130px 130px 160px 44px;
 }
 
 .wide-input {
@@ -659,6 +665,56 @@ dd {
 .fee-total {
   display: inline-flex;
   margin-top: 10px;
+}
+
+.fee-percent-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-top: 10px;
+}
+
+.fee-percent-grid span {
+  background: var(--soft-green);
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  border-radius: 8px;
+  color: var(--brand-dark);
+  font-size: 13px;
+  font-weight: 850;
+  padding: 8px;
+}
+
+.fee-confirm-row {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.fee-note {
+  color: var(--muted);
+  flex: 1;
+  font-size: 13px;
+  min-width: 190px;
+}
+
+.status-pill {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 900;
+  padding: 6px 9px;
+}
+
+.status-pill.confirmed {
+  background: var(--soft-green);
+  border-color: rgba(15, 118, 110, 0.28);
+  color: var(--brand-dark);
 }
 
 .drop-card {

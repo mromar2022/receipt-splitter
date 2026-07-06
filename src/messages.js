@@ -14,7 +14,7 @@ export function buildReceiptMessage(group, receiptTitle, split, members, currenc
     }
     if (Math.abs(breakdown.feeTotal) > 0) {
       lines.push(
-        `* Share of tax/service: ${formatMoney(breakdown.feeTotal, currency)}`,
+        `* Share of tax/service/discount: ${formatMoney(breakdown.feeTotal, currency)}`,
       );
     }
     lines.push(`Total: ${formatMoney(breakdown.total, currency)}`, "");

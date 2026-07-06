@@ -13,6 +13,10 @@ export function saveGroups(groups) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(groups));
 }
 
+export function clearGroups() {
+  localStorage.removeItem(STORAGE_KEY);
+}
+
 export function uid(prefix = "id") {
   return `${prefix}_${Date.now().toString(36)}_${Math.random()
     .toString(36)

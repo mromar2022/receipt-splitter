@@ -24,7 +24,7 @@ import {
 } from "./calculations.js";
 import { buildGroupMessage, buildReceiptMessage } from "./messages.js";
 import { parseReceiptText } from "./receiptParser.js";
-import { loadGroups, saveGroups, uid } from "./storage.js";
+import { clearGroups, saveGroups, uid } from "./storage.js";
 import {
   isSupabaseConfigured,
   loadRemoteGroups,
@@ -34,7 +34,7 @@ import {
 
 const SAMPLE_MEMBERS = ["Omar", "Muhammad", "Zak", "Umar", "Abdullah"];
 const TODAY = new Date().toISOString().slice(0, 10);
-const SIGNED_OUT_STATUS = "Sign up or log in to save online";
+const SIGNED_OUT_STATUS = "Sign up or log in to save trip data";
 
 function makeDefaultGroup() {
   return {
@@ -90,6 +90,20 @@ function numberOrZero(value) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function feeCategoryFromLabel(label, fallback = "fee") {
+  const lower = String(label || "").toLowerCase();
+  if (/discount|promo|voucher|rebate|less/.test(lower)) return "discount";
+  if (/sst|vat|gst|service tax|\btax\b/.test(lower)) return "tax";
+  if (/service charge|svc|service fee|\bservice\b/.test(lower)) return "service";
+  if (/rounding/.test(lower)) return "rounding";
+  return fallback || "fee";
+}
+
+function amountForFeeCategory(amount, category) {
+  const numeric = numberOrZero(amount);
+  return category === "discount" ? -Math.abs(numeric) : Math.abs(numeric);
+}
+
 function normalizeAiReceipt(aiReceipt, group, currentReceipt) {
   const currency = aiReceipt.currency || currentReceipt.currency || group.currency || "RM";
   const items = (aiReceipt.items || []).map((item) => {
@@ -110,23 +124,27 @@ function normalizeAiReceipt(aiReceipt, group, currentReceipt) {
     };
   });
 
-  const fees = (aiReceipt.fees || []).map((fee) => ({
-    id: uid("fee"),
-    label: fee.label || "Receipt fee",
-    amount: numberOrZero(fee.amount),
-    splitMode:
-      fee.category === "tax" || fee.category === "service"
-        ? "proportional"
-        : "equal",
-    memberIds: currentReceipt.participantIds,
-    shares: {},
-  }));
+  const fees = (aiReceipt.fees || []).map((fee) => {
+    const category = feeCategoryFromLabel(fee.label, fee.category || "fee");
+    return {
+      id: uid("fee"),
+      label: fee.label || "Receipt fee",
+      category,
+      amount: amountForFeeCategory(fee.amount, category),
+      splitMode: "proportional",
+      confirmed: false,
+      memberIds: currentReceipt.participantIds,
+      shares: {},
+    };
+  });
 
   const discounts = (aiReceipt.discounts || []).map((discount) => ({
     id: uid("fee"),
     label: discount.label || "Discount",
+    category: "discount",
     amount: -Math.abs(numberOrZero(discount.amount)),
     splitMode: "proportional",
+    confirmed: false,
     memberIds: currentReceipt.participantIds,
     shares: {},
   }));
@@ -160,11 +178,7 @@ async function copyText(text, onCopied) {
 }
 
 function App() {
-  const initialGroups = useMemo(() => {
-    const savedGroups = loadGroups();
-    if (!savedGroups || hasOnlyOldSampleData(savedGroups)) return [makeDefaultGroup()];
-    return savedGroups;
-  }, []);
+  const initialGroups = useMemo(() => [makeDefaultGroup()], []);
   const [groups, setGroups] = useState(initialGroups);
   const [activeGroupId, setActiveGroupId] = useState(initialGroups[0]?.id);
   const [newGroupName, setNewGroupName] = useState("");
@@ -183,6 +197,15 @@ function App() {
 
   const group = groups.find((entry) => entry.id === activeGroupId) || groups[0];
   const summary = useMemo(() => summarizeTrip(group), [group]);
+  const hasAccountWorkspace = Boolean(authUser && remoteLoaded);
+
+  function resetLocalWorkspace() {
+    const blankGroup = makeDefaultGroup();
+    setGroups([blankGroup]);
+    setActiveGroupId(blankGroup.id);
+    setTab("receipt");
+    groupsRef.current = [blankGroup];
+  }
 
   useEffect(() => {
     groupsRef.current = groups;
@@ -200,6 +223,10 @@ function App() {
       setAuthReady(true);
       setRemoteLoaded(!user);
       setSyncStatus(user ? "Loading account" : SIGNED_OUT_STATUS);
+      if (!user) {
+        clearGroups();
+        resetLocalWorkspace();
+      }
     });
 
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -208,6 +235,10 @@ function App() {
       setAuthUser(user);
       setRemoteLoaded(!user);
       setSyncStatus(user ? "Loading account" : SIGNED_OUT_STATUS);
+      if (!user) {
+        clearGroups();
+        resetLocalWorkspace();
+      }
     });
 
     return () => {
@@ -257,8 +288,12 @@ function App() {
   }, [authReady, authUser?.id]);
 
   useEffect(() => {
-    saveGroups(groups);
-  }, [groups]);
+    if (authUser && remoteLoaded) saveGroups(groups);
+  }, [groups, authUser?.id, remoteLoaded]);
+
+  useEffect(() => {
+    if (!hasAccountWorkspace && tab !== "receipt") setTab("receipt");
+  }, [hasAccountWorkspace, tab]);
 
   useEffect(() => {
     if (!isSupabaseConfigured || !authUser || !remoteLoaded) return undefined;
@@ -297,6 +332,30 @@ function App() {
     setRemoteLoaded(true);
     setSyncStatus(SIGNED_OUT_STATUS);
     setAuthMessage("");
+    clearGroups();
+    resetLocalWorkspace();
+  }
+
+  function requireAccount(action = "save trip data") {
+    if (!isSupabaseConfigured) {
+      setToast("Connect the database before saving data");
+      window.setTimeout(() => setToast(""), 1800);
+      return false;
+    }
+
+    if (!authUser) {
+      setToast(`Sign up or log in to ${action}`);
+      window.setTimeout(() => setToast(""), 1800);
+      return false;
+    }
+
+    if (!remoteLoaded) {
+      setToast("Account is still loading");
+      window.setTimeout(() => setToast(""), 1800);
+      return false;
+    }
+
+    return true;
   }
 
   function updateActiveGroup(updater) {
@@ -308,6 +367,7 @@ function App() {
   }
 
   function addGroup() {
+    if (!requireAccount("create trip groups")) return;
     const name = newGroupName.trim();
     if (!name) return;
     const next = {
@@ -338,15 +398,18 @@ function App() {
   }
 
   function saveExpense(expense) {
+    if (!requireAccount("save expenses")) return false;
     updateActiveGroup((entry) => ({
       ...entry,
       expenses: [{ ...expense, id: uid("expense"), createdAt: new Date().toISOString() }, ...entry.expenses],
     }));
     setToast("Saved to trip balance");
     window.setTimeout(() => setToast(""), 1800);
+    return true;
   }
 
   function updateExpense(expenseId, patch) {
+    if (!requireAccount("edit expenses")) return;
     updateActiveGroup((entry) => ({
       ...entry,
       expenses: entry.expenses.map((expense) =>
@@ -364,6 +427,7 @@ function App() {
   }
 
   function deleteExpense(expenseId) {
+    if (!requireAccount("delete expenses")) return;
     updateActiveGroup((entry) => ({
       ...entry,
       expenses: entry.expenses.filter((expense) => expense.id !== expenseId),
@@ -416,30 +480,38 @@ function App() {
       <section className="layout">
         <aside className="side-panel">
           <div className="panel-heading">
-            <h2>Trip Groups</h2>
+            <h2>{hasAccountWorkspace ? "Trip Groups" : "One Receipt"}</h2>
           </div>
-          <div className="group-list">
-            {groups.map((entry) => (
-              <button
-                className={`group-button ${entry.id === group.id ? "active" : ""}`}
-                key={entry.id}
-                onClick={() => setActiveGroupId(entry.id)}
-              >
-                <span>{entry.name}</span>
-                <small>{entry.members.length} members</small>
-              </button>
-            ))}
-          </div>
-          <div className="inline-form">
-            <input
-              value={newGroupName}
-              onChange={(event) => setNewGroupName(event.target.value)}
-              placeholder="Trip name"
-            />
-            <button className="icon-button" onClick={addGroup} aria-label="Add trip group">
-              <Plus size={18} />
-            </button>
-          </div>
+          {hasAccountWorkspace ? (
+            <>
+              <div className="group-list">
+                {groups.map((entry) => (
+                  <button
+                    className={`group-button ${entry.id === group.id ? "active" : ""}`}
+                    key={entry.id}
+                    onClick={() => setActiveGroupId(entry.id)}
+                  >
+                    <span>{entry.name}</span>
+                    <small>{entry.members.length} members</small>
+                  </button>
+                ))}
+              </div>
+              <div className="inline-form">
+                <input
+                  value={newGroupName}
+                  onChange={(event) => setNewGroupName(event.target.value)}
+                  placeholder="Trip name"
+                />
+                <button className="icon-button" onClick={addGroup} aria-label="Add trip group">
+                  <Plus size={18} />
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="empty-state compact-empty">
+              Single-use receipt only. Log in to save trips, use AI, and keep history.
+            </div>
+          )}
 
           <div className="panel-heading members-heading">
             <h2>People</h2>
@@ -472,34 +544,54 @@ function App() {
         </aside>
 
         <section className="main-panel">
-          <TripDashboard
-            group={group}
-            summary={summary}
-            onCopy={() =>
-              copyText(
-                buildGroupMessage(group, summary, group.currency),
-                () => setToast("Group summary copied"),
-              )
-            }
-          />
+          {hasAccountWorkspace ? (
+            <TripDashboard
+              group={group}
+              summary={summary}
+              onCopy={() =>
+                copyText(
+                  buildGroupMessage(group, summary, group.currency),
+                  () => setToast("Group summary copied"),
+                )
+              }
+            />
+          ) : (
+            <section className="dashboard single-use-banner">
+              <div className="dashboard-title">
+                <div>
+                  <p className="eyebrow">Single-use mode</p>
+                  <h2>Split One Receipt</h2>
+                </div>
+              </div>
+              <p>
+                Names and receipt edits stay only on this screen. Sign in to save expenses, use AI reading, and keep trip history.
+              </p>
+            </section>
+          )}
 
           <nav className="tabs" aria-label="Workspace">
             <button className={tab === "receipt" ? "active" : ""} onClick={() => setTab("receipt")}>
               <ReceiptText size={16} />
               Receipt
             </button>
-            <button className={tab === "manual" ? "active" : ""} onClick={() => setTab("manual")}>
-              <Plus size={16} />
-              Expense
-            </button>
-            <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
-              <Clipboard size={16} />
-              Trip Ledger
-            </button>
+            {hasAccountWorkspace && (
+              <>
+                <button className={tab === "manual" ? "active" : ""} onClick={() => setTab("manual")}>
+                  <Plus size={16} />
+                  Expense
+                </button>
+                <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>
+                  <Clipboard size={16} />
+                  Trip Ledger
+                </button>
+              </>
+            )}
           </nav>
 
           {tab === "receipt" && (
             <ReceiptWorkspace
+              canUseAi={hasAccountWorkspace}
+              canSave={hasAccountWorkspace}
               group={group}
               onSaveExpense={saveExpense}
               onToast={setToast}
@@ -507,6 +599,7 @@ function App() {
           )}
           {tab === "manual" && (
             <ManualExpenseForm
+              canSave={hasAccountWorkspace}
               group={group}
               onSaveExpense={saveExpense}
             />
@@ -776,7 +869,7 @@ function TripDashboard({ group, summary, onCopy }) {
   );
 }
 
-function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
+function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) {
   const [receipt, setReceipt] = useState(() => emptyReceipt(group));
   const [title, setTitle] = useState("Receipt");
   const [date, setDate] = useState(TODAY);
@@ -795,6 +888,23 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
     setPaidBy(group.members[0]?.id || "");
   }, [group.id]);
 
+  useEffect(() => {
+    const memberIds = group.members.map((member) => member.id);
+    setPaidBy((current) => (memberIds.includes(current) ? current : memberIds[0] || ""));
+    setReceipt((current) => ({
+      ...current,
+      participantIds: memberIds,
+      items: current.items.map((item) => ({
+        ...item,
+        memberIds: (item.memberIds || []).filter((id) => memberIds.includes(id)),
+      })),
+      fees: current.fees.map((fee) => ({
+        ...fee,
+        memberIds: (fee.memberIds || []).filter((id) => memberIds.includes(id)),
+      })),
+    }));
+  }, [group.members]);
+
   const membersForReceipt = useMemo(
     () => selectedMembers(group, receipt.participantIds),
     [group, receipt.participantIds],
@@ -802,6 +912,12 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
   const split = useMemo(
     () => computeReceiptSplit(receipt, group.members),
     [receipt, group.members],
+  );
+  const memberSubtotals = Object.fromEntries(
+    Object.entries(split.byMember).map(([memberId, entry]) => [
+      memberId,
+      entry.itemSubtotal,
+    ]),
   );
 
   function updateReceipt(patch) {
@@ -874,6 +990,11 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
   }
 
   async function readWithAi() {
+    if (!canUseAi) {
+      onToast("Sign up or log in to use AI receipt reading");
+      return;
+    }
+
     if (!imageUrl) {
       onToast("Attach a receipt image first");
       return;
@@ -935,8 +1056,10 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
         {
           id: uid("fee"),
           label: "Service charge",
+          category: "service",
           amount: 0,
           splitMode: "proportional",
+          confirmed: false,
           memberIds: current.participantIds,
           shares: {},
         },
@@ -956,6 +1079,11 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
         items: current.items.map((item) => ({
           ...item,
           memberIds: item.memberIds.filter((id) => participantIds.includes(id)),
+        })),
+        fees: current.fees.map((fee) => ({
+          ...fee,
+          confirmed: false,
+          memberIds: (fee.memberIds || []).filter((id) => participantIds.includes(id)),
         })),
       };
     });
@@ -1007,8 +1135,19 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
   }
 
   function saveReceiptExpense() {
+    if (!canSave) {
+      onToast("Sign up or log in to save receipts");
+      return;
+    }
+
     if (!paidBy) {
       onToast("Choose who paid first");
+      return;
+    }
+
+    const unconfirmedFeeCount = receipt.fees.filter((fee) => !fee.confirmed).length;
+    if (unconfirmedFeeCount) {
+      onToast("Confirm tax, service, discount, and fee lines first");
       return;
     }
 
@@ -1019,7 +1158,7 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
       ]),
     );
 
-    onSaveExpense({
+    const saved = onSaveExpense({
       title,
       amount: split.calculatedTotal,
       currency: receipt.currency || group.currency,
@@ -1038,6 +1177,8 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
         imageUrl,
       },
     });
+
+    if (!saved) return;
 
     setReceipt(emptyReceipt(group));
     setTitle("Receipt");
@@ -1104,7 +1245,7 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
               <button
                 className="secondary-button"
                 onClick={readWithAi}
-                disabled={!imageUrl || isAiReading}
+                disabled={!canUseAi || !imageUrl || isAiReading}
               >
                 <Sparkles size={16} />
                 AI Read Receipt
@@ -1237,6 +1378,7 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
                 key={fee.id}
                 fee={fee}
                 members={membersForReceipt}
+                memberSubtotals={memberSubtotals}
                 currency={receipt.currency || group.currency}
                 onUpdate={(updater) => updateFee(fee.id, updater)}
                 onDelete={() =>
@@ -1307,7 +1449,7 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
                 <div className="summary-row" key={member.id}>
                   <strong>{member.name}</strong>
                   <span>Subtotal {formatMoney(breakdown.itemSubtotal, receipt.currency || group.currency)}</span>
-                  <span>Tax/service {formatMoney(breakdown.feeTotal, receipt.currency || group.currency)}</span>
+                  <span>Tax/service/discount {formatMoney(breakdown.feeTotal, receipt.currency || group.currency)}</span>
                   <b>{formatMoney(breakdown.total, receipt.currency || group.currency)}</b>
                 </div>
               );
@@ -1334,7 +1476,7 @@ function ReceiptWorkspace({ group, onSaveExpense, onToast }) {
             </button>
             <button className="primary-button" onClick={saveReceiptExpense}>
               <Check size={16} />
-              Save to Trip
+              {canSave ? "Save to Trip" : "Log in to Save"}
             </button>
           </div>
         </section>
@@ -1447,15 +1589,49 @@ function ReceiptItemEditor({
   );
 }
 
-function FeeEditor({ fee, members, currency, onUpdate, onDelete }) {
+function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete }) {
   const selected = new Set(fee.memberIds?.length ? fee.memberIds : members.map((member) => member.id));
+  const category = fee.category || feeCategoryFromLabel(fee.label);
+  const selectedMembers = members.filter((member) => selected.has(member.id));
+  const selectedSubtotal = selectedMembers.reduce(
+    (sum, member) => sum + Number(memberSubtotals?.[member.id] || 0),
+    0,
+  );
+
+  function updateFeeFields(patch, shouldConfirm = false) {
+    onUpdate((current) => ({
+      ...current,
+      ...patch,
+      category: patch.category || current.category || feeCategoryFromLabel(patch.label || current.label),
+      confirmed: shouldConfirm,
+    }));
+  }
+
+  function previewShare(memberId) {
+    const amount = Number(fee.amount || 0);
+    if (!selectedMembers.length) return { percent: 0, amount: 0 };
+
+    if (selectedSubtotal <= 0) {
+      return {
+        percent: 100 / selectedMembers.length,
+        amount: money(amount / selectedMembers.length),
+      };
+    }
+
+    const subtotal = Number(memberSubtotals?.[memberId] || 0);
+    const percent = (subtotal / selectedSubtotal) * 100;
+    return {
+      percent,
+      amount: money((amount * subtotal) / selectedSubtotal),
+    };
+  }
 
   function toggleMember(memberId) {
     onUpdate((current) => {
       const next = new Set(current.memberIds?.length ? current.memberIds : members.map((member) => member.id));
       if (next.has(memberId)) next.delete(memberId);
       else next.add(memberId);
-      return { ...current, memberIds: [...next] };
+      return { ...current, confirmed: false, memberIds: [...next] };
     });
   }
 
@@ -1467,18 +1643,43 @@ function FeeEditor({ fee, members, currency, onUpdate, onDelete }) {
           <input
             value={fee.label}
             onChange={(event) =>
-              onUpdate((current) => ({ ...current, label: event.target.value }))
+              updateFeeFields({
+                label: event.target.value,
+                category: feeCategoryFromLabel(event.target.value, category),
+              })
             }
           />
+        </label>
+        <label>
+          Type
+          <select
+            value={category}
+            onChange={(event) => {
+              const nextCategory = event.target.value;
+              updateFeeFields({
+                category: nextCategory,
+                amount: amountForFeeCategory(fee.amount, nextCategory),
+                splitMode: "proportional",
+              });
+            }}
+          >
+            <option value="tax">Tax / SST / VAT</option>
+            <option value="service">Service</option>
+            <option value="discount">Discount</option>
+            <option value="fee">Other fee</option>
+            <option value="rounding">Rounding</option>
+          </select>
         </label>
         <label>
           Amount
           <input
             type="number"
             step="0.01"
-            value={fee.amount}
+            value={category === "discount" ? Math.abs(Number(fee.amount || 0)) : fee.amount}
             onChange={(event) =>
-              onUpdate((current) => ({ ...current, amount: Number(event.target.value || 0) }))
+              updateFeeFields({
+                amount: amountForFeeCategory(event.target.value, category),
+              })
             }
           />
         </label>
@@ -1487,11 +1688,11 @@ function FeeEditor({ fee, members, currency, onUpdate, onDelete }) {
           <select
             value={fee.splitMode}
             onChange={(event) =>
-              onUpdate((current) => ({ ...current, splitMode: event.target.value }))
+              updateFeeFields({ splitMode: event.target.value })
             }
           >
             <option value="equal">Equal</option>
-            <option value="proportional">By subtotal</option>
+            <option value="proportional">By purchase %</option>
             <option value="manual">Manual</option>
           </select>
         </label>
@@ -1510,6 +1711,18 @@ function FeeEditor({ fee, members, currency, onUpdate, onDelete }) {
           </button>
         ))}
       </div>
+      {fee.splitMode === "proportional" && (
+        <div className="fee-percent-grid">
+          {selectedMembers.map((member) => {
+            const share = previewShare(member.id);
+            return (
+              <span key={member.id}>
+                {member.name}: {share.percent.toFixed(1)}% / {formatMoney(share.amount, currency)}
+              </span>
+            );
+          })}
+        </div>
+      )}
       {fee.splitMode === "manual" && (
         <div className="share-grid">
           {members
@@ -1524,6 +1737,7 @@ function FeeEditor({ fee, members, currency, onUpdate, onDelete }) {
                   onChange={(event) =>
                     onUpdate((current) => ({
                       ...current,
+                      confirmed: false,
                       shares: {
                         ...(current.shares || {}),
                         [member.id]: Number(event.target.value || 0),
@@ -1535,12 +1749,38 @@ function FeeEditor({ fee, members, currency, onUpdate, onDelete }) {
             ))}
         </div>
       )}
-      <span className="fee-total">{formatMoney(fee.amount, currency)}</span>
+      <div className="fee-confirm-row">
+        <span className={fee.confirmed ? "status-pill confirmed" : "status-pill"}>
+          {fee.confirmed ? "Confirmed" : "Needs confirmation"}
+        </span>
+        <span className="fee-note">
+          {fee.splitMode === "proportional"
+            ? "Applied by each person's purchase percentage."
+            : "Check this line before saving the receipt."}
+        </span>
+        <button
+          className={fee.confirmed ? "tiny-button" : "primary-button"}
+          onClick={() =>
+            updateFeeFields(
+              {
+                amount: amountForFeeCategory(fee.amount, category),
+                category,
+                splitMode: fee.splitMode || "proportional",
+              },
+              true,
+            )
+          }
+        >
+          <Check size={16} />
+          Confirm
+        </button>
+        <span className="fee-total">{formatMoney(fee.amount, currency)}</span>
+      </div>
     </article>
   );
 }
 
-function ManualExpenseForm({ group, onSaveExpense }) {
+function ManualExpenseForm({ canSave, group, onSaveExpense }) {
   const [form, setForm] = useState({
     title: "",
     amount: "",
@@ -1588,7 +1828,9 @@ function ManualExpenseForm({ group, onSaveExpense }) {
   }
 
   function saveManualExpense() {
-    onSaveExpense({
+    if (!canSave) return;
+
+    const saved = onSaveExpense({
       ...form,
       amount: Number(form.amount || 0),
       shares,
@@ -1599,6 +1841,8 @@ function ManualExpenseForm({ group, onSaveExpense }) {
             ? "customPercent"
             : "equal",
     });
+    if (!saved) return;
+
     updateForm({
       title: "",
       amount: "",

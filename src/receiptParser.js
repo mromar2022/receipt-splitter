@@ -146,8 +146,10 @@ export function parseReceiptText(rawText, fallbackCurrency = "RM") {
               : kind === "discount"
                 ? "Discount"
                 : cleanItemName(line.slice(0, amount.index)) || "Other fee",
+        category: kind,
         amount: signedAmount,
-        splitMode: kind === "discount" ? "proportional" : "proportional",
+        splitMode: "proportional",
+        confirmed: false,
         memberIds: [],
         shares: {},
       });
@@ -182,8 +184,10 @@ export function parseReceiptText(rawText, fallbackCurrency = "RM") {
     receipt.fees.push({
       id: uid("fee"),
       label: "Rounding / receipt adjustment",
+      category: "rounding",
       amount: Number(variance.toFixed(2)),
       splitMode: "proportional",
+      confirmed: false,
       memberIds: [],
       shares: {},
     });
