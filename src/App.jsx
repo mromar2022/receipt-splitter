@@ -34,6 +34,7 @@ import {
 
 const SAMPLE_MEMBERS = ["Omar", "Muhammad", "Zak", "Umar", "Abdullah"];
 const TODAY = new Date().toISOString().slice(0, 10);
+const SIGNED_OUT_STATUS = "Sign up or log in to save online";
 
 function makeDefaultGroup() {
   return {
@@ -175,7 +176,7 @@ function App() {
   const [authMessage, setAuthMessage] = useState("");
   const [remoteLoaded, setRemoteLoaded] = useState(!isSupabaseConfigured);
   const [syncStatus, setSyncStatus] = useState(
-    isSupabaseConfigured ? "Checking account" : "Local only",
+    isSupabaseConfigured ? "Checking account" : "Database is not connected",
   );
   const [toast, setToast] = useState("");
   const groupsRef = useRef(initialGroups);
@@ -198,7 +199,7 @@ function App() {
       setAuthUser(user);
       setAuthReady(true);
       setRemoteLoaded(!user);
-      setSyncStatus(user ? "Loading account" : "Local only");
+      setSyncStatus(user ? "Loading account" : SIGNED_OUT_STATUS);
     });
 
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -206,7 +207,7 @@ function App() {
       const user = session?.user || null;
       setAuthUser(user);
       setRemoteLoaded(!user);
-      setSyncStatus(user ? "Loading account" : "Local only");
+      setSyncStatus(user ? "Loading account" : SIGNED_OUT_STATUS);
     });
 
     return () => {
@@ -294,7 +295,7 @@ function App() {
     await supabase.auth.signOut();
     setAuthUser(null);
     setRemoteLoaded(true);
-    setSyncStatus("Local only");
+    setSyncStatus(SIGNED_OUT_STATUS);
     setAuthMessage("");
   }
 
@@ -535,7 +536,7 @@ function AuthPanel({
     return (
       <section className="auth-strip">
         <div>
-          <strong>Local only</strong>
+          <strong>Database not connected</strong>
           <span>Database is not connected.</span>
         </div>
       </section>
@@ -572,7 +573,7 @@ function AuthPanel({
     <section className="auth-strip auth-form">
       <div>
         <strong>Account</strong>
-        <span>{authMessage || syncStatus}</span>
+        <span>{authMessage || SIGNED_OUT_STATUS}</span>
       </div>
       <input
         autoComplete="email"
