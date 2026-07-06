@@ -12,6 +12,16 @@ export function itemTotal(item) {
   return money(Number(item.quantity || 0) * Number(item.unitPrice || 0));
 }
 
+function feeAmount(fee, baseAmount = 0) {
+  if (fee.amountMode === "percent") {
+    const rawRate = Math.abs(Number(fee.ratePercent || 0));
+    const signedRate = fee.category === "discount" ? -rawRate : rawRate;
+    return money((Number(baseAmount || 0) * signedRate) / 100);
+  }
+
+  return money(Number(fee.amount || 0));
+}
+
 function distributeCustom(total, shares, selectedIds, mode) {
   const raw = selectedIds.map((id) => Number(shares?.[id] || 0));
   const rawSum = raw.reduce((sum, value) => sum + value, 0);
@@ -65,6 +75,7 @@ export function computeReceiptSplit(receipt, members) {
     ]),
   );
   let unassignedTotal = 0;
+  let feeTotal = 0;
 
   for (const item of receipt.items) {
     const selectedIds = (item.memberIds?.length ? item.memberIds : []).filter(
@@ -111,29 +122,33 @@ export function computeReceiptSplit(receipt, members) {
     );
 
     if (!selectedIds.length) {
-      unassignedTotal += Number(fee.amount || 0);
+      unassignedTotal += feeAmount(fee, 0);
       continue;
     }
 
-    const amount = Number(fee.amount || 0);
+    const selectedSubtotal = selectedIds.reduce(
+      (sum, id) => sum + byMember[id].itemSubtotal,
+      0,
+    );
+    const amount = feeAmount(fee, selectedSubtotal);
     let distributed = {};
 
-    if (fee.splitMode === "equal") {
+    if (fee.amountMode === "percent") {
+      distributed = Object.fromEntries(
+        selectedIds.map((id) => [id, feeAmount(fee, byMember[id].itemSubtotal)]),
+      );
+    } else if (fee.splitMode === "equal") {
       distributed = distributeEqual(amount, selectedIds);
     } else if (fee.splitMode === "manual") {
       distributed = distributeCustom(amount, fee.shares, selectedIds, "amount");
     } else {
-      const subtotal = selectedIds.reduce(
-        (sum, id) => sum + byMember[id].itemSubtotal,
-        0,
-      );
-      if (subtotal <= 0) {
+      if (selectedSubtotal <= 0) {
         distributed = distributeEqual(amount, selectedIds);
       } else {
         distributed = Object.fromEntries(
           selectedIds.map((id) => [
             id,
-            money((amount * byMember[id].itemSubtotal) / subtotal),
+            money((amount * byMember[id].itemSubtotal) / selectedSubtotal),
           ]),
         );
       }
@@ -142,9 +157,11 @@ export function computeReceiptSplit(receipt, members) {
     for (const memberId of selectedIds) {
       const share = distributed[memberId] || 0;
       byMember[memberId].feeTotal = money(byMember[memberId].feeTotal + share);
+      feeTotal = money(feeTotal + share);
       byMember[memberId].fees.push({
         id: fee.id,
         label: fee.label,
+        ratePercent: fee.amountMode === "percent" ? Number(fee.ratePercent || 0) : undefined,
         amount: share,
       });
     }
@@ -165,7 +182,7 @@ export function computeReceiptSplit(receipt, members) {
     calculatedTotal,
     unassignedTotal: money(unassignedTotal),
     itemTotal: money(receipt.items.reduce((sum, item) => sum + itemTotal(item), 0)),
-    feeTotal: money(receipt.fees.reduce((sum, fee) => sum + Number(fee.amount || 0), 0)),
+    feeTotal,
   };
 }
 

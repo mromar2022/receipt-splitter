@@ -53,10 +53,12 @@ const receiptSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["label", "amount", "category", "notes"],
+        required: ["label", "amount", "rate_percent", "base_amount", "category", "notes"],
         properties: {
           label: { type: "string" },
           amount: { type: "number" },
+          rate_percent: { type: ["number", "null"] },
+          base_amount: { type: ["number", "null"] },
           category: {
             type: "string",
             enum: ["tax", "service", "fee", "rounding", "other"],
@@ -70,10 +72,12 @@ const receiptSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["label", "amount", "notes"],
+        required: ["label", "amount", "rate_percent", "base_amount", "notes"],
         properties: {
           label: { type: "string" },
           amount: { type: "number" },
+          rate_percent: { type: ["number", "null"] },
+          base_amount: { type: ["number", "null"] },
           notes: { type: "string" },
         },
       },
@@ -183,7 +187,9 @@ export async function readReceiptWithOpenAI({ imageUrl, currency }) {
     : process.env.OPENAI_MODEL;
   const prompt = [
     "Read this restaurant or shop receipt image.",
-    "Extract purchasable items, quantities, unit prices, line totals, discounts, taxes, service charges, fees, subtotal, total, currency, merchant, and date.",
+    "Extract the receipt name or merchant, purchasable items, quantities, unit prices, line totals, discounts, taxes, service charges, fees, subtotal, total, currency, merchant, date, and important receipt notes.",
+    "For service charge, service tax, SST, VAT, GST, discounts, and fees, include the printed percentage rate in rate_percent when shown, the base amount in base_amount when shown, and the final amount charged in amount.",
+    "Return date as YYYY-MM-DD when possible.",
     "Keep numbers as decimal amounts only.",
     `If currency is unclear, use ${currency || "RM"}.`,
     "Do not invent lines that are not on the receipt. Use null for unknown numeric totals.",

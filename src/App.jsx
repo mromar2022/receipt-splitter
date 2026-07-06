@@ -24,7 +24,7 @@ import {
 } from "./calculations.js";
 import { buildGroupMessage, buildReceiptMessage } from "./messages.js";
 import { parseReceiptText } from "./receiptParser.js";
-import { clearGroups, saveGroups, uid } from "./storage.js";
+import { clearGroups, loadGroups, saveGroups, uid } from "./storage.js";
 import {
   isSupabaseConfigured,
   loadRemoteGroups,
@@ -90,18 +90,28 @@ function numberOrZero(value) {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function numberOrNull(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function feeCategoryFromLabel(label, fallback = "fee") {
   const lower = String(label || "").toLowerCase();
   if (/discount|promo|voucher|rebate|less/.test(lower)) return "discount";
   if (/sst|vat|gst|service tax|\btax\b/.test(lower)) return "tax";
   if (/service charge|svc|service fee|\bservice\b/.test(lower)) return "service";
   if (/rounding/.test(lower)) return "rounding";
-  return fallback || "fee";
+  return fallback === "other" ? "fee" : fallback || "fee";
 }
 
 function amountForFeeCategory(amount, category) {
   const numeric = numberOrZero(amount);
   return category === "discount" ? -Math.abs(numeric) : Math.abs(numeric);
+}
+
+function signedPercentForFee(ratePercent, category) {
+  const numeric = Math.abs(numberOrZero(ratePercent));
+  return category === "discount" ? -numeric : numeric;
 }
 
 function normalizeAiReceipt(aiReceipt, group, currentReceipt) {
@@ -126,10 +136,15 @@ function normalizeAiReceipt(aiReceipt, group, currentReceipt) {
 
   const fees = (aiReceipt.fees || []).map((fee) => {
     const category = feeCategoryFromLabel(fee.label, fee.category || "fee");
+    const ratePercent = numberOrNull(fee.rate_percent);
+    const amountMode = ratePercent ? "percent" : "amount";
     return {
       id: uid("fee"),
       label: fee.label || "Receipt fee",
       category,
+      amountMode,
+      ratePercent: ratePercent || 0,
+      baseAmount: numberOrZero(fee.base_amount),
       amount: amountForFeeCategory(fee.amount, category),
       splitMode: "proportional",
       confirmed: false,
@@ -142,6 +157,9 @@ function normalizeAiReceipt(aiReceipt, group, currentReceipt) {
     id: uid("fee"),
     label: discount.label || "Discount",
     category: "discount",
+    amountMode: numberOrNull(discount.rate_percent) ? "percent" : "amount",
+    ratePercent: numberOrNull(discount.rate_percent) || 0,
+    baseAmount: numberOrZero(discount.base_amount),
     amount: -Math.abs(numberOrZero(discount.amount)),
     splitMode: "proportional",
     confirmed: false,
@@ -178,9 +196,16 @@ async function copyText(text, onCopied) {
 }
 
 function App() {
-  const initialGroups = useMemo(() => [makeDefaultGroup()], []);
-  const [groups, setGroups] = useState(initialGroups);
-  const [activeGroupId, setActiveGroupId] = useState(initialGroups[0]?.id);
+  const initialState = useMemo(() => {
+    const savedGroups = loadGroups();
+    if (!savedGroups || hasOnlyOldSampleData(savedGroups)) {
+      return { groups: [makeDefaultGroup()], hasLocalData: false };
+    }
+    return { groups: savedGroups, hasLocalData: true };
+  }, []);
+  const [groups, setGroups] = useState(initialState.groups);
+  const [activeGroupId, setActiveGroupId] = useState(initialState.groups[0]?.id);
+  const [hasLocalAccountData, setHasLocalAccountData] = useState(initialState.hasLocalData);
   const [newGroupName, setNewGroupName] = useState("");
   const [newMemberName, setNewMemberName] = useState("");
   const [tab, setTab] = useState("receipt");
@@ -193,17 +218,20 @@ function App() {
     isSupabaseConfigured ? "Checking account" : "Database is not connected",
   );
   const [toast, setToast] = useState("");
-  const groupsRef = useRef(initialGroups);
+  const groupsRef = useRef(initialState.groups);
 
   const group = groups.find((entry) => entry.id === activeGroupId) || groups[0];
   const summary = useMemo(() => summarizeTrip(group), [group]);
-  const hasAccountWorkspace = Boolean(authUser && remoteLoaded);
+  const hasAccountWorkspace = Boolean(authUser || hasLocalAccountData);
+  const canSaveData = Boolean(authUser || hasLocalAccountData);
+  const canUseAi = Boolean(authUser);
 
   function resetLocalWorkspace() {
     const blankGroup = makeDefaultGroup();
     setGroups([blankGroup]);
     setActiveGroupId(blankGroup.id);
     setTab("receipt");
+    setHasLocalAccountData(false);
     groupsRef.current = [blankGroup];
   }
 
@@ -216,29 +244,31 @@ function App() {
 
     let mounted = true;
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (!mounted) return;
-      const user = data.session?.user || null;
-      setAuthUser(user);
-      setAuthReady(true);
-      setRemoteLoaded(!user);
-      setSyncStatus(user ? "Loading account" : SIGNED_OUT_STATUS);
-      if (!user) {
-        clearGroups();
-        resetLocalWorkspace();
-      }
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!mounted) return;
+        const user = data.session?.user || null;
+        setAuthUser(user);
+        setAuthReady(true);
+        setRemoteLoaded(!user);
+        setSyncStatus(user ? "Loading account" : SIGNED_OUT_STATUS);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        setAuthReady(true);
+        setRemoteLoaded(true);
+        setSyncStatus(SIGNED_OUT_STATUS);
+        setAuthMessage(error.message || "Could not check account.");
+      });
 
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!mounted) return;
       const user = session?.user || null;
+      setAuthReady(true);
       setAuthUser(user);
       setRemoteLoaded(!user);
       setSyncStatus(user ? "Loading account" : SIGNED_OUT_STATUS);
-      if (!user) {
-        clearGroups();
-        resetLocalWorkspace();
-      }
     });
 
     return () => {
@@ -258,15 +288,20 @@ function App() {
       .then(async (remoteGroups) => {
         if (cancelled) return;
 
-        if (remoteGroups?.length) {
+        if (hasLocalAccountData) {
+          await saveRemoteGroups(authUser.id, groupsRef.current);
+          setHasLocalAccountData(true);
+        } else if (remoteGroups?.length) {
           const nextGroups = hasOnlyOldSampleData(remoteGroups)
             ? [makeDefaultGroup()]
             : remoteGroups;
           setGroups(nextGroups);
           setActiveGroupId(nextGroups[0]?.id);
+          setHasLocalAccountData(true);
           saveGroups(nextGroups);
         } else {
           await saveRemoteGroups(authUser.id, groupsRef.current);
+          setHasLocalAccountData(true);
         }
 
         if (!cancelled) {
@@ -288,8 +323,8 @@ function App() {
   }, [authReady, authUser?.id]);
 
   useEffect(() => {
-    if (authUser && remoteLoaded) saveGroups(groups);
-  }, [groups, authUser?.id, remoteLoaded]);
+    if (authUser || hasLocalAccountData) saveGroups(groups);
+  }, [groups, authUser?.id, hasLocalAccountData]);
 
   useEffect(() => {
     if (!hasAccountWorkspace && tab !== "receipt") setTab("receipt");
@@ -314,15 +349,47 @@ function App() {
   async function signIn(email, password) {
     if (!supabase) return;
     setAuthMessage("");
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    setAuthMessage(error ? error.message : "Logged in.");
+    setSyncStatus("Logging in");
+    setRemoteLoaded(false);
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      setRemoteLoaded(true);
+      setSyncStatus(SIGNED_OUT_STATUS);
+      setAuthMessage(error.message);
+      return;
+    }
+    const user = data.session?.user || null;
+    if (user) {
+      setAuthUser(user);
+      setSyncStatus("Loading account");
+    } else {
+      setRemoteLoaded(true);
+      setSyncStatus(SIGNED_OUT_STATUS);
+    }
+    setAuthMessage("Logged in.");
   }
 
   async function signUp(email, password) {
     if (!supabase) return;
     setAuthMessage("");
-    const { error } = await supabase.auth.signUp({ email, password });
-    setAuthMessage(error ? error.message : "Account created. Check email if needed.");
+    setSyncStatus("Creating account");
+    setRemoteLoaded(false);
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    if (error) {
+      setRemoteLoaded(true);
+      setSyncStatus(SIGNED_OUT_STATUS);
+      setAuthMessage(error.message);
+      return;
+    }
+    const user = data.session?.user || null;
+    if (user) {
+      setAuthUser(user);
+      setSyncStatus("Loading account");
+    } else {
+      setRemoteLoaded(true);
+      setSyncStatus(SIGNED_OUT_STATUS);
+    }
+    setAuthMessage("Account created. Check email if needed.");
   }
 
   async function signOut() {
@@ -343,14 +410,16 @@ function App() {
       return false;
     }
 
-    if (!authUser) {
-      setToast(`Sign up or log in to ${action}`);
+    if (authUser || hasLocalAccountData) return true;
+
+    if (!authReady || syncStatus === "Checking account" || syncStatus === "Logging in") {
+      setToast("Account is still reconnecting");
       window.setTimeout(() => setToast(""), 1800);
       return false;
     }
 
-    if (!remoteLoaded) {
-      setToast("Account is still loading");
+    if (!authUser) {
+      setToast(`Sign up or log in to ${action}`);
       window.setTimeout(() => setToast(""), 1800);
       return false;
     }
@@ -399,11 +468,12 @@ function App() {
 
   function saveExpense(expense) {
     if (!requireAccount("save expenses")) return false;
+    setHasLocalAccountData(true);
     updateActiveGroup((entry) => ({
       ...entry,
       expenses: [{ ...expense, id: uid("expense"), createdAt: new Date().toISOString() }, ...entry.expenses],
     }));
-    setToast("Saved to trip balance");
+    setToast(authUser ? "Saved to trip balance" : "Saved locally. Log in to sync online");
     window.setTimeout(() => setToast(""), 1800);
     return true;
   }
@@ -590,8 +660,8 @@ function App() {
 
           {tab === "receipt" && (
             <ReceiptWorkspace
-              canUseAi={hasAccountWorkspace}
-              canSave={hasAccountWorkspace}
+              canUseAi={canUseAi}
+              canSave={canSaveData}
               group={group}
               onSaveExpense={saveExpense}
               onToast={setToast}
@@ -599,7 +669,7 @@ function App() {
           )}
           {tab === "manual" && (
             <ManualExpenseForm
-              canSave={hasAccountWorkspace}
+              canSave={canSaveData}
               group={group}
               onSaveExpense={saveExpense}
             />
@@ -1017,6 +1087,9 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
 
       setReceipt((current) => normalizeAiReceipt(payload.receipt, group, current));
       if (payload.receipt.merchant) setTitle(payload.receipt.merchant);
+      if (/^\d{4}-\d{2}-\d{2}/.test(payload.receipt.date || "")) {
+        setDate(payload.receipt.date.slice(0, 10));
+      }
       setOcrStatus(
         `AI detected ${(payload.receipt.items || []).length} items and ${[
           ...(payload.receipt.fees || []),
@@ -1057,6 +1130,9 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
           id: uid("fee"),
           label: "Service charge",
           category: "service",
+          amountMode: "percent",
+          ratePercent: 0,
+          baseAmount: 0,
           amount: 0,
           splitMode: "proportional",
           confirmed: false,
@@ -1212,46 +1288,29 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
               <p className="eyebrow">Receipt upload</p>
               <h2>Scan</h2>
             </div>
-            <div className="button-row">
-              <input
-                ref={uploadRef}
-                type="file"
-                accept="image/*"
-                hidden
-                onChange={(event) => {
-                  readFile(event.target.files?.[0]);
-                  event.target.value = "";
-                }}
-              />
-              <input
-                ref={cameraRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                hidden
-                onChange={(event) => {
-                  readFile(event.target.files?.[0]);
-                  event.target.value = "";
-                }}
-              />
-              <button className="primary-button" onClick={() => uploadRef.current?.click()}>
-                <Upload size={16} />
-                Upload Receipt
-              </button>
-              <button className="secondary-button" onClick={() => cameraRef.current?.click()}>
-                <Camera size={16} />
-                Take Photo
-              </button>
-              <button
-                className="secondary-button"
-                onClick={readWithAi}
-                disabled={!canUseAi || !imageUrl || isAiReading}
-              >
-                <Sparkles size={16} />
-                AI Read Receipt
-              </button>
-            </div>
           </div>
+
+          <input
+            ref={uploadRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(event) => {
+              readFile(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+          <input
+            ref={cameraRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            hidden
+            onChange={(event) => {
+              readFile(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
 
           <label className="attachment-drop">
             <FileImage size={22} />
@@ -1322,6 +1381,25 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
               </div>
             </div>
           )}
+
+          <div className="button-row bottom-action-row">
+            <button className="primary-button" onClick={() => uploadRef.current?.click()}>
+              <Upload size={16} />
+              Upload Receipt
+            </button>
+            <button className="secondary-button" onClick={() => cameraRef.current?.click()}>
+              <Camera size={16} />
+              Take Photo
+            </button>
+            <button
+              className="secondary-button"
+              onClick={readWithAi}
+              disabled={!canUseAi || !imageUrl || isAiReading}
+            >
+              <Sparkles size={16} />
+              AI Read Receipt
+            </button>
+          </div>
         </section>
 
         <section className="tool-panel">
@@ -1330,10 +1408,6 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
               <p className="eyebrow">Detected lines</p>
               <h2>Items</h2>
             </div>
-            <button className="secondary-button" onClick={addItem}>
-              <Plus size={16} />
-              Split Item
-            </button>
           </div>
           <div className="item-list">
             {receipt.items.length ? (
@@ -1359,6 +1433,12 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
               <div className="empty-state">No receipt items yet.</div>
             )}
           </div>
+          <div className="button-row bottom-action-row">
+            <button className="secondary-button" onClick={addItem}>
+              <Plus size={16} />
+              Add Item
+            </button>
+          </div>
         </section>
 
         <section className="tool-panel">
@@ -1367,10 +1447,6 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
               <p className="eyebrow">Tax, service, discounts</p>
               <h2>Fees</h2>
             </div>
-            <button className="secondary-button" onClick={addFee}>
-              <Plus size={16} />
-              Add Fee
-            </button>
           </div>
           <div className="fee-list">
             {receipt.fees.map((fee) => (
@@ -1390,6 +1466,12 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
               />
             ))}
             {!receipt.fees.length && <div className="empty-state">No tax or service lines yet.</div>}
+          </div>
+          <div className="button-row bottom-action-row">
+            <button className="secondary-button" onClick={addFee}>
+              <Plus size={16} />
+              Add Fee
+            </button>
           </div>
         </section>
       </div>
@@ -1451,6 +1533,17 @@ function ReceiptWorkspace({ canSave, canUseAi, group, onSaveExpense, onToast }) 
                   <span>Subtotal {formatMoney(breakdown.itemSubtotal, receipt.currency || group.currency)}</span>
                   <span>Tax/service/discount {formatMoney(breakdown.feeTotal, receipt.currency || group.currency)}</span>
                   <b>{formatMoney(breakdown.total, receipt.currency || group.currency)}</b>
+                  {!!breakdown.fees.length && (
+                    <div className="person-fee-lines">
+                      {breakdown.fees.map((fee) => (
+                        <span key={`${member.id}-${fee.id}`}>
+                          {fee.label}
+                          {fee.ratePercent ? ` (${Math.abs(fee.ratePercent).toFixed(2)}%)` : ""}:{" "}
+                          {formatMoney(fee.amount, receipt.currency || group.currency)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -1597,6 +1690,12 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
     (sum, member) => sum + Number(memberSubtotals?.[member.id] || 0),
     0,
   );
+  const amountMode = fee.amountMode === "percent" ? "percent" : "amount";
+  const signedRatePercent = signedPercentForFee(fee.ratePercent, category);
+  const calculatedFeeAmount =
+    amountMode === "percent"
+      ? money((selectedSubtotal * signedRatePercent) / 100)
+      : Number(fee.amount || 0);
 
   function updateFeeFields(patch, shouldConfirm = false) {
     onUpdate((current) => ({
@@ -1608,9 +1707,17 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
   }
 
   function previewShare(memberId) {
-    const amount = Number(fee.amount || 0);
     if (!selectedMembers.length) return { percent: 0, amount: 0 };
 
+    if (amountMode === "percent") {
+      const subtotal = Number(memberSubtotals?.[memberId] || 0);
+      return {
+        percent: Number(fee.ratePercent || 0),
+        amount: money((subtotal * signedRatePercent) / 100),
+      };
+    }
+
+    const amount = Number(fee.amount || 0);
     if (selectedSubtotal <= 0) {
       return {
         percent: 100 / selectedMembers.length,
@@ -1659,6 +1766,7 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
               updateFeeFields({
                 category: nextCategory,
                 amount: amountForFeeCategory(fee.amount, nextCategory),
+                ratePercent: Math.abs(Number(fee.ratePercent || 0)),
                 splitMode: "proportional",
               });
             }}
@@ -1671,28 +1779,62 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
           </select>
         </label>
         <label>
-          Amount
-          <input
-            type="number"
-            step="0.01"
-            value={category === "discount" ? Math.abs(Number(fee.amount || 0)) : fee.amount}
+          Entry
+          <select
+            value={amountMode}
             onChange={(event) =>
               updateFeeFields({
-                amount: amountForFeeCategory(event.target.value, category),
+                amountMode: event.target.value,
+                splitMode: "proportional",
               })
             }
-          />
+          >
+            <option value="percent">Percentage</option>
+            <option value="amount">Amount</option>
+          </select>
         </label>
+        {amountMode === "percent" ? (
+          <label>
+            Rate %
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={Math.abs(Number(fee.ratePercent || 0))}
+              onChange={(event) =>
+                updateFeeFields({
+                  ratePercent: Number(event.target.value || 0),
+                  amount: calculatedFeeAmount,
+                })
+              }
+            />
+          </label>
+        ) : (
+          <label>
+            Amount
+            <input
+              type="number"
+              step="0.01"
+              value={category === "discount" ? Math.abs(Number(fee.amount || 0)) : fee.amount}
+              onChange={(event) =>
+                updateFeeFields({
+                  amount: amountForFeeCategory(event.target.value, category),
+                })
+              }
+            />
+          </label>
+        )}
         <label>
           Split type
           <select
-            value={fee.splitMode}
+            value={amountMode === "percent" ? "proportional" : fee.splitMode}
             onChange={(event) =>
               updateFeeFields({ splitMode: event.target.value })
             }
+            disabled={amountMode === "percent"}
           >
-            <option value="equal">Equal</option>
             <option value="proportional">By purchase %</option>
+            <option value="equal">Equal</option>
             <option value="manual">Manual</option>
           </select>
         </label>
@@ -1700,6 +1842,20 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
           <Trash2 size={16} />
         </button>
       </div>
+      {amountMode === "percent" && (
+        <div className="fee-base-line">
+          <span>Base: {formatMoney(selectedSubtotal, currency)}</span>
+          <span>
+            {Math.abs(Number(fee.ratePercent || 0)).toFixed(2)}% = {formatMoney(calculatedFeeAmount, currency)}
+          </span>
+        </div>
+      )}
+      {amountMode === "amount" && (
+        <div className="fee-base-line">
+          <span>Fixed amount</span>
+          <span>{formatMoney(calculatedFeeAmount, currency)}</span>
+        </div>
+      )}
       <div className="chip-row">
         {members.map((member) => (
           <button
@@ -1711,19 +1867,26 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
           </button>
         ))}
       </div>
-      {fee.splitMode === "proportional" && (
+      {(amountMode === "percent" || fee.splitMode === "proportional") && (
         <div className="fee-percent-grid">
           {selectedMembers.map((member) => {
             const share = previewShare(member.id);
+            const label =
+              amountMode === "percent"
+                ? `${Math.abs(Number(fee.ratePercent || 0)).toFixed(2)}% of ${formatMoney(
+                    memberSubtotals?.[member.id] || 0,
+                    currency,
+                  )}`
+                : `${share.percent.toFixed(1)}% of purchase`;
             return (
               <span key={member.id}>
-                {member.name}: {share.percent.toFixed(1)}% / {formatMoney(share.amount, currency)}
+                {member.name}: {label} / {formatMoney(share.amount, currency)}
               </span>
             );
           })}
         </div>
       )}
-      {fee.splitMode === "manual" && (
+      {fee.splitMode === "manual" && amountMode === "amount" && (
         <div className="share-grid">
           {members
             .filter((member) => selected.has(member.id))
@@ -1754,18 +1917,26 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
           {fee.confirmed ? "Confirmed" : "Needs confirmation"}
         </span>
         <span className="fee-note">
-          {fee.splitMode === "proportional"
-            ? "Applied by each person's purchase percentage."
-            : "Check this line before saving the receipt."}
+          {amountMode === "percent"
+            ? "Calculated separately from each person's item subtotal."
+            : fee.splitMode === "proportional"
+              ? "Applied by each person's purchase percentage."
+              : "Check this line before saving the receipt."}
         </span>
         <button
           className={fee.confirmed ? "tiny-button" : "primary-button"}
           onClick={() =>
             updateFeeFields(
               {
-                amount: amountForFeeCategory(fee.amount, category),
+                amount: amountMode === "percent"
+                  ? calculatedFeeAmount
+                  : amountForFeeCategory(fee.amount, category),
+                amountMode,
+                ratePercent: amountMode === "percent"
+                  ? Math.abs(Number(fee.ratePercent || 0))
+                  : 0,
                 category,
-                splitMode: fee.splitMode || "proportional",
+                splitMode: amountMode === "percent" ? "proportional" : fee.splitMode || "proportional",
               },
               true,
             )
@@ -1774,7 +1945,7 @@ function FeeEditor({ fee, members, memberSubtotals, currency, onUpdate, onDelete
           <Check size={16} />
           Confirm
         </button>
-        <span className="fee-total">{formatMoney(fee.amount, currency)}</span>
+        <span className="fee-total">{formatMoney(calculatedFeeAmount, currency)}</span>
       </div>
     </article>
   );

@@ -2,6 +2,7 @@ import { uid } from "./storage.js";
 
 const MONEY_RE =
   /(?:RM|MYR|USD|SGD|EUR|GBP|AED|TRY|\$)?\s*(-?\d{1,3}(?:,\d{3})*(?:[.,]\d{2})|-?\d+(?:[.,]\d{2}))/gi;
+const PERCENT_RE = /(-?\d+(?:[.,]\d+)?)\s*%/i;
 
 function moneyToNumber(value) {
   const clean = String(value).trim();
@@ -20,6 +21,13 @@ function amountsIn(line) {
       index: match.index ?? 0,
     }))
     .filter((entry) => Number.isFinite(entry.value));
+}
+
+function percentIn(line) {
+  const match = line.match(PERCENT_RE);
+  if (!match) return null;
+  const value = moneyToNumber(match[1]);
+  return Number.isFinite(value) ? Math.abs(value) : null;
 }
 
 function detectCurrency(text, fallback = "RM") {
@@ -136,6 +144,7 @@ export function parseReceiptText(rawText, fallbackCurrency = "RM") {
     if (kind === "tax" || kind === "service" || kind === "discount" || kind === "fee") {
       const signedAmount =
         kind === "discount" ? -Math.abs(amount.value) : amount.value;
+      const ratePercent = percentIn(line);
       receipt.fees.push({
         id: uid("fee"),
         label:
@@ -147,6 +156,9 @@ export function parseReceiptText(rawText, fallbackCurrency = "RM") {
                 ? "Discount"
                 : cleanItemName(line.slice(0, amount.index)) || "Other fee",
         category: kind,
+        amountMode: ratePercent ? "percent" : "amount",
+        ratePercent: ratePercent || 0,
+        baseAmount: 0,
         amount: signedAmount,
         splitMode: "proportional",
         confirmed: false,
@@ -185,6 +197,9 @@ export function parseReceiptText(rawText, fallbackCurrency = "RM") {
       id: uid("fee"),
       label: "Rounding / receipt adjustment",
       category: "rounding",
+      amountMode: "amount",
+      ratePercent: 0,
+      baseAmount: 0,
       amount: Number(variance.toFixed(2)),
       splitMode: "proportional",
       confirmed: false,

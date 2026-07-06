@@ -303,6 +303,17 @@ label select {
   color: var(--danger);
 }
 
+.icon-button.danger {
+  flex: 0 0 32px;
+  min-height: 32px;
+  width: 32px;
+}
+
+.icon-button.danger svg {
+  height: 14px;
+  width: 14px;
+}
+
 .align-end {
   align-self: end;
 }
@@ -455,6 +466,10 @@ dd {
   margin: 0 0 14px;
 }
 
+.tabs:has(button:only-child) {
+  grid-template-columns: 1fr;
+}
+
 .tabs button.active {
   background: var(--brand);
   border-color: var(--brand);
@@ -499,7 +514,7 @@ dd {
 }
 
 .fee-grid {
-  grid-template-columns: minmax(180px, 1.5fr) 130px 130px 160px 44px;
+  grid-template-columns: minmax(180px, 1.5fr) 120px 110px 110px 150px 32px;
 }
 
 .wide-input {
@@ -642,6 +657,13 @@ dd {
   padding-top: 10px;
 }
 
+.bottom-action-row {
+  border-top: 1px solid var(--line);
+  justify-content: flex-end;
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
 .item-actions span,
 .fee-total {
   color: var(--brand-dark);
@@ -665,6 +687,22 @@ dd {
 .fee-total {
   display: inline-flex;
   margin-top: 10px;
+}
+
+.fee-base-line {
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--brand-dark);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 850;
+  gap: 8px;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding: 8px;
 }
 
 .fee-percent-grid {
@@ -753,6 +791,19 @@ dd {
 
 .manual-summary .summary-row {
   grid-template-columns: 1fr auto;
+}
+
+.person-fee-lines {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 5px;
+  grid-column: 1 / -1;
+  padding-top: 8px;
+}
+
+.person-fee-lines span {
+  color: var(--brand-dark);
+  font-weight: 800;
 }
 
 .warning-line {

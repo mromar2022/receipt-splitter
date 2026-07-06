@@ -12,7 +12,12 @@ export function buildReceiptMessage(group, receiptTitle, split, members, currenc
       const qty = item.quantity ? ` x${item.quantity}` : "";
       lines.push(`* ${item.name}${qty}: ${formatMoney(item.amount, currency)}`);
     }
-    if (Math.abs(breakdown.feeTotal) > 0) {
+    if (breakdown.fees?.length) {
+      for (const fee of breakdown.fees) {
+        const rate = fee.ratePercent ? ` (${Math.abs(fee.ratePercent).toFixed(2)}%)` : "";
+        lines.push(`* ${fee.label}${rate}: ${formatMoney(fee.amount, currency)}`);
+      }
+    } else if (Math.abs(breakdown.feeTotal) > 0) {
       lines.push(
         `* Share of tax/service/discount: ${formatMoney(breakdown.feeTotal, currency)}`,
       );
